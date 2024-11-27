@@ -130,8 +130,11 @@ class OffensiveAgent(PacmanAgent):
             # Return to base side
             base_x = game_state.get_walls().width // 2 
             base_x = base_x if not self.is_red else base_x - 1
-            # Closest base-side point to the agent
-            base_point = (base_x, self.state_knowledge['my_pos'][1])
+            
+            # All x,y where x is base_x and y is not a wall
+            base_point = [(base_x, y) for y in range(game_state.get_walls().height) if not game_state.has_wall(base_x, y)]
+            # Get the one with minimum distance
+            base_point = min(base_point, key=lambda x: self.get_maze_distance(self.state_knowledge['my_pos'], x))
             return self.a_star_engine.get_next_action(game_state, base_point, reset=True)
         
         # If we dont have a path or we have been reborn, create one to the nearest food
