@@ -385,6 +385,24 @@ class ExpectiMinimaxPlanner():
                 best_action = action
         return best_action
 
+    # def min_value(self, current_state, current_depth, alpha, beta, enemies_on_sight):
+    #     if self.game_terminal(current_state, current_depth):
+    #         return self.evaluation_function(current_state, enemies_on_sight)
+    #     v = float('inf')
+    #     remaining_enemies = enemies_on_sight.copy()
+    #     min_agent_index = remaining_enemies.pop(0)
+    #     for action in current_state.get_legal_actions(min_agent_index):
+    #         next_state = self.get_new_state(current_state, action, min_agent_index)
+    #         if len(remaining_enemies) == 0:
+    #             v = min(v, self.max_value(next_state, current_depth + 1, alpha, beta, enemies_on_sight))
+    #         else:
+    #             v = min(v, self.min_value(next_state, current_depth, alpha, beta, enemies_on_sight))
+            
+    #         if v <= alpha:
+    #             return v
+    #         beta = min(beta, v)
+    #     return v
+    
 ########################################################################
 #########################   A STAR CLASSES    ##########################
 ########################################################################
