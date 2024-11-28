@@ -136,7 +136,7 @@ class PacmanAgent(CaptureAgent):
         return features * weights
 
 class OffensiveAgent(PacmanAgent):
-    def __init__(self, index, time_for_computing=0.1, expectiminimax_depth=1):
+    def __init__(self, index, time_for_computing=0.1, expectiminimax_depth=5):
         super().__init__(index, time_for_computing)
         self.machine_state = 'a_star'
         self.a_star_engine = AStarEngine(index, manhattan_heuristic)
@@ -235,44 +235,23 @@ class OffensiveAgent(PacmanAgent):
             return self.expectiminimax_step(game_state)
 
 class DefensiveAgent(PacmanAgent):
-    def __init__(self, index, time_for_computing=0.1, expectiminimax_depth=3):
+    def __init__(self, index, time_for_computing=0.1, expectiminimax_depth=1):
         super().__init__(index, time_for_computing)
         self.machine_state = 'a_star'
         self.a_star_engine = AStarEngine(index, manhattan_heuristic)
-        self.expectiminimax_engine = ExpectiMinimaxPlanner(max_depth=expectiminimax_depth, index = index, evaluation_function=lambda x: 0)
+
+        def expectiminimax_defensive_evaluation(game_state, known_opponents):
+            return 0
+               
+        self.expectiminimax_engine = ExpectiMinimaxPlanner(max_depth=expectiminimax_depth, 
+                                                           index = index, 
+                                                           evaluation_function=expectiminimax_defensive_evaluation)
 
     def a_star_step(self, game_state):
-        # Check if the agent should be looking for food or returning to base
-        if self.state_knowledge['num_food_carrying'] >= self.bag_capacity:
-            # Return to base side
-            base_x = game_state.get_walls().width // 2 
-            base_x = base_x if not self.is_red else base_x - 1
-            
-            # All x,y where x is base_x and y is not a wall
-            base_point = [(base_x, y) for y in range(game_state.get_walls().height) if not game_state.has_wall(base_x, y)]
-            # Get the one with minimum distance
-            base_point = min(base_point, key=lambda x: self.get_maze_distance(self.state_knowledge['my_pos'], x))
-            return self.a_star_engine.get_next_action(game_state, base_point, reset=True)
-        
-        # If we dont have a path or we have been reborn, create one to the nearest food
-        elif self.state_knowledge['reborn'] or not self.a_star_engine.has_path():
-            food_list = game_state.get_red_food().as_list() if not self.is_red else game_state.get_blue_food().as_list()
-            # Is there still food in the maze?
-            if len(food_list) == 0:
-                return self.a_star_engine.get_next_action(game_state, self.start, reset=True)
-            else:
-                # Obtain nearest food
-                my_pos = self.state_knowledge['my_pos']
-                # Minimun distance to a food pellet
-                min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
-                # List of food pellets at minimum distance and randomly choose one
-                nearest_points = [food for food in food_list if self.get_maze_distance(my_pos, food) == min_distance]
-                nearest_point = random.choice(nearest_points)
-                return self.a_star_engine.get_next_action(game_state, nearest_point, reset=True)
-        else:
-            return self.a_star_engine.get_next_action()
+       return 'Stop'
         
     def expectiminimax_step(self, game_state):
+        return 'Stop'
         return self.expectiminimax_engine.get_maximizing_action(game_state, 
                                                                 self.state_knowledge['obs_opponent_indexes'])
     
@@ -283,37 +262,23 @@ class DefensiveAgent(PacmanAgent):
         CASE 2 - Opponents on sight: ExpectiMiniMax
         """
         if self.state_knowledge['opponents_on_sight']:
-            return 'a_star'
+            if self.machine_state == 'a_star':
+                print('Switching to ExpectiMiniMax strategy')
+            return 'expectiminimax'
         else:
+            if self.machine_state == 'expectiminimax':
+                print('Switching to A* strategy')
+                self.a_star_engine.reset()
             return 'a_star'
 
     def choose_action(self, game_state):
         # Call super() to update the state_knowledge
         super().choose_action(game_state)
-        return 'Stop'
         self.machine_state = self.choose_strategy()
         if self.machine_state == 'a_star':
             return self.a_star_step(game_state)
         elif self.machine_state == 'expectiminimax':
             return self.expectiminimax_step(game_state)
-
-    def get_features(self, game_state, is_red):
-        features = util.Counter()
-        self.red = is_red
-        food_list = self.get_food(game_state).as_list()
-        features['successor_score'] = -len(food_list)  # self.getScore(successor)
-
-        # Compute distance to the nearest food
-
-        if len(food_list) > 0:  # This should always be True,  but better safe than sorry
-            my_pos = game_state.get_agent_state(self.index).get_position()
-            min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
-            features['distance_to_food'] = min_distance
-        return features
-
-    def get_weights(self):
-        return {'successor_score': 100, 'distance_to_food': -1}
-
 
 ########################################################################
 #####################   ExpectiMinimax Classes    ######################
@@ -353,7 +318,7 @@ class ExpectiMinimaxPlanner():
             if len(remaining_enemies) == 0:
                 value = self.max_value(next_state, current_depth + 1, alpha, beta, enemies_on_sight)
             else:
-                value = self.expect_value(next_state, current_depth, alpha, beta, enemies_on_sight)
+                value = self.expect_value(next_state, current_depth, alpha, beta, remaining_enemies)
             
             final_value += prob * value
         return final_value
@@ -375,7 +340,6 @@ class ExpectiMinimaxPlanner():
     def get_maximizing_action(self, game_state, enemies_on_sight):
         best_value = float('-inf')
         best_action = None
-
         for action in game_state.get_legal_actions(self.max_agent_index):
             next_state = self.get_new_state(game_state, action, self.max_agent_index)
             v = self.expect_value(next_state, 0, float('-inf'), float('inf'), enemies_on_sight)
@@ -396,13 +360,13 @@ class ExpectiMinimaxPlanner():
     #         if len(remaining_enemies) == 0:
     #             v = min(v, self.max_value(next_state, current_depth + 1, alpha, beta, enemies_on_sight))
     #         else:
-    #             v = min(v, self.min_value(next_state, current_depth, alpha, beta, enemies_on_sight))
+    #             v = min(v, self.min_value(next_state, current_depth, alpha, beta, remaining_enemies))
             
     #         if v <= alpha:
     #             return v
     #         beta = min(beta, v)
     #     return v
-    
+
 ########################################################################
 #########################   A STAR CLASSES    ##########################
 ########################################################################
