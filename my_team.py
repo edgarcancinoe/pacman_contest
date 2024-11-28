@@ -13,18 +13,19 @@ from contest.capture_agents import CaptureAgent
 from contest.game import Directions
 from contest.util import nearest_point
 
+
 def manhattan_heuristic(game_state, problem, index):
-    """The Manhattan distance heuristic for a PositionSearchProblem"""
+    """The Manhattan distance heuristic for a PositionSearchProblem with multiple goal positions."""
     xy1 = game_state.get_agent_position(index)
-    xy2 = problem.goal
-    return abs(xy1[0] - xy2[0]) + abs(xy1[1] - xy2[1])
+    goals = problem.goal  # Assume problem.goal is a list of goal positions
+    return min(abs(xy1[0] - g[0]) + abs(xy1[1] - g[1]) for g in goals)
 
 #################
 # Team creation #
 #################
 
 def create_team(first_index, second_index, is_red,
-                first='OffensiveAgent', second='OffensiveAgent', num_training=0):
+                first='OffensiveAgent', second='DefensiveAgent', num_training=0):
     """
     This function should return a list of two agents that will form the
     team, initialized using firstIndex and secondIndex as their agent
@@ -50,12 +51,13 @@ class PacmanAgent(CaptureAgent):
     A base class for reflex agents that choose score-maximizing actions
     """
 
-    def __init__(self, index, time_for_computing=.1, bag_capacity=4):
+    def __init__(self, index, time_for_computing=.1, bag_capacity=9):
         super().__init__(index, time_for_computing)
         self.start = None
         self.is_red = None
         self.last_position = None
         self.bag_capacity = bag_capacity
+        self.machine_state = None
 
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
@@ -64,17 +66,32 @@ class PacmanAgent(CaptureAgent):
         print('I am agent', self.index, 'and I am on the red team:', self.is_red)
         CaptureAgent.register_initial_state(self, game_state)
 
-    def relevant_information(self, game_state):
-        state_info = dict()
+    def get_opponents_information(self, game_state):
+        opponents_info = {}
+        observed_opponent_indexes = [i for i in self.get_opponents(game_state) if game_state.get_agent_state(i).get_position() is not None]
+        observed_opponent_states = [game_state.get_agent_state(i) for i in observed_opponent_indexes]
         
-        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state) if game_state.get_agent_state(i) is not None]
+        observed_opponent_positions = []
+        observed_opponent_ispacman = []
+        for enemy in observed_opponent_states:
+            position = enemy.get_position()
+            if position is not None:
+                observed_opponent_positions.append(position)
+                observed_opponent_ispacman.append(True) if enemy.is_pacman else observed_opponent_ispacman.append(False)
+        
+        opponents_info['obs_opponent_indexes'] = observed_opponent_indexes
+        opponents_info['obs_opponent_states'] = observed_opponent_states
+        opponents_info['obs_opponent_positions'] = observed_opponent_positions
+        opponents_info['observed_opponent_ispacman'] = observed_opponent_ispacman
+        opponents_info['n_obs_opponents'] = len(observed_opponent_indexes)
 
-        # List of observable opponent's positions 
-        state_info['opponent_pos'] = [enemy.get_position() for enemy in enemies if enemy.get_position() is not None]
-        state_info['n_obs_opponents'] = len(state_info['opponent_pos'])
-        # List of observable invader's positions
-        state_info['invader_pos'] = [enemy.get_position() for enemy in enemies if enemy.is_pacman and enemy.get_position() is not None]
-        state_info['n_obs_invaders'] = len(state_info['invader_pos'])
+        return opponents_info
+    
+    def relevant_information(self, game_state):
+        
+        # Get observable opponents' information and create dict
+        state_info = self.get_opponents_information(game_state)
+
         # How many food pellets the agent is carrying in the given state
         state_info['num_food_carrying'] = game_state.get_agent_state(self.index).num_carrying
 
@@ -84,7 +101,7 @@ class PacmanAgent(CaptureAgent):
         # True-False knowledge
         state_info['reborn'] = state_info['my_pos'] == self.start and self.get_maze_distance(state_info['my_pos'], self.last_position) > 1
         state_info['opponents_on_sight'] = state_info['n_obs_opponents'] > 0
-        state_info['invaders_on_sight'] = state_info['n_obs_invaders'] > 0
+
         
         # Update last position
         self.last_position = state_info['my_pos']
@@ -119,10 +136,110 @@ class PacmanAgent(CaptureAgent):
         return features * weights
 
 class OffensiveAgent(PacmanAgent):
-    def __init__(self, index, time_for_computing=0.1):
+    def __init__(self, index, time_for_computing=0.1, expectiminimax_depth=1):
         super().__init__(index, time_for_computing)
-
+        self.machine_state = 'a_star'
         self.a_star_engine = AStarEngine(index, manhattan_heuristic)
+
+        def expectiminimax_offensive_evaluation(game_state, known_opponents):
+            
+            # Get observable opponents' information in evaluating state
+            opponents_info = self.get_opponents_information(game_state)
+
+            # TODO: If we are missing information about a known opponent, 
+            # we can assume it is at distance 6, but is it a pacman?
+
+            obs_opponents_positions = opponents_info['obs_opponent_positions']
+            my_pos = game_state.get_agent_position(self.index)
+
+            # Distance to the opponents
+            distance_to_opponents = [self.get_maze_distance(my_pos, pos) for pos in obs_opponents_positions]
+            # Whether the opponents are a pacman or not
+            obs_opponents_shape = opponents_info['observed_opponent_ispacman']
+            
+            # We want to maximize the distance to the opponents if they are not pacmans, and minimize it if they are
+            # We also want to minimize the distance to the nearest food pellet
+            food_list = game_state.get_red_food().as_list() if not self.is_red else game_state.get_blue_food().as_list()
+            min_distance_to_food = min([self.get_maze_distance(my_pos, food) for food in food_list])
+            
+            am_i_pacman = game_state.get_agent_state(self.index).is_pacman
+
+
+            # If we are a pacman, we want to maximize the distance to the opponents that are not pacmans
+            closest_opponent_idx = distance_to_opponents.index(min(distance_to_opponents))
+            closest_opponent_distance = distance_to_opponents[closest_opponent_idx]
+            closest_opponent_is_pacman = obs_opponents_shape[closest_opponent_idx]
+
+            # CASE: I am a pacman and the closest opponent is not a pacman -> maximize distance to opponent
+            if not am_i_pacman and not closest_opponent_is_pacman:
+                return -closest_opponent_distance + min_distance_to_food
+            # CASE: I am a pacman and the closest opponent is a pacman -> Only mind the distance to the food
+            elif not am_i_pacman and closest_opponent_is_pacman:
+                return min_distance_to_food
+            # CASE: I am not a pacman and the closest opponent is not a pacman -> Only mind the distance to the food
+            elif am_i_pacman and not closest_opponent_is_pacman:
+                return min_distance_to_food
+            # CASE: I am not a pacman and the closest opponent is a pacman -> minimize distance to opponent
+            else:
+                return closest_opponent_distance + min_distance_to_food
+               
+        self.expectiminimax_engine = ExpectiMinimaxPlanner(max_depth=expectiminimax_depth, 
+                                                           index = index, 
+                                                           evaluation_function=expectiminimax_offensive_evaluation)
+
+    def a_star_step(self, game_state):
+        # Check if the agent should be looking for food or returning to base
+
+        # Is there still food in the maze? OR is the agent carrying the maximum amount of food? -> Return to base side
+        food_list = game_state.get_red_food().as_list() if not self.is_red else game_state.get_blue_food().as_list()
+        if len(food_list) == 0 or self.state_knowledge['num_food_carrying'] >= self.bag_capacity:
+            # Return to base side: All x,y where x is base_x and y is not a wall
+            base_x = game_state.get_walls().width // 2 
+            base_x = base_x if not self.is_red else base_x - 1
+            base_point = [(base_x, y) for y in range(game_state.get_walls().height) if not game_state.has_wall(base_x, y)]
+            return self.a_star_engine.get_next_action(game_state, base_point, reset=True)
+        
+        # If we dont have a path or we have been reborn, create one to the nearest food
+        elif self.state_knowledge['reborn'] or not self.a_star_engine.has_path():
+            return self.a_star_engine.get_next_action(game_state, food_list, reset=True)
+        else:
+            return self.a_star_engine.get_next_action()
+        
+    def expectiminimax_step(self, game_state):
+        return self.expectiminimax_engine.get_maximizing_action(game_state, 
+                                                                self.state_knowledge['obs_opponent_indexes'])
+    
+    def choose_strategy(self):
+        """Choose Strategy depending on the observed state
+        
+        CASE 1 - No opponents on sight: A* to the nearest food
+        CASE 2 - Opponents on sight: ExpectiMiniMax
+        """
+        if self.state_knowledge['opponents_on_sight']:
+            if self.machine_state == 'a_star':
+                print('Switching to ExpectiMiniMax strategy')
+            return 'expectiminimax'
+        else:
+            if self.machine_state == 'expectiminimax':
+                print('Switching to A* strategy')
+                self.a_star_engine.reset()
+            return 'a_star'
+
+    def choose_action(self, game_state):
+        # Call super() to update the state_knowledge
+        super().choose_action(game_state)
+        self.machine_state = self.choose_strategy()
+        if self.machine_state == 'a_star':
+            return self.a_star_step(game_state)
+        elif self.machine_state == 'expectiminimax':
+            return self.expectiminimax_step(game_state)
+
+class DefensiveAgent(PacmanAgent):
+    def __init__(self, index, time_for_computing=0.1, expectiminimax_depth=3):
+        super().__init__(index, time_for_computing)
+        self.machine_state = 'a_star'
+        self.a_star_engine = AStarEngine(index, manhattan_heuristic)
+        self.expectiminimax_engine = ExpectiMinimaxPlanner(max_depth=expectiminimax_depth, index = index, evaluation_function=lambda x: 0)
 
     def a_star_step(self, game_state):
         # Check if the agent should be looking for food or returning to base
@@ -155,8 +272,9 @@ class OffensiveAgent(PacmanAgent):
         else:
             return self.a_star_engine.get_next_action()
         
-    def expectiminimax(self, game_state):
-        return 0
+    def expectiminimax_step(self, game_state):
+        return self.expectiminimax_engine.get_maximizing_action(game_state, 
+                                                                self.state_knowledge['obs_opponent_indexes'])
     
     def choose_strategy(self):
         """Choose Strategy depending on the observed state
@@ -166,18 +284,18 @@ class OffensiveAgent(PacmanAgent):
         """
         if self.state_knowledge['opponents_on_sight']:
             return 'a_star'
-            return 'expectiminimax'
         else:
             return 'a_star'
 
     def choose_action(self, game_state):
         # Call super() to update the state_knowledge
         super().choose_action(game_state)
-        machine_state = self.choose_strategy()
-        if machine_state == 'a_star':
+        return 'Stop'
+        self.machine_state = self.choose_strategy()
+        if self.machine_state == 'a_star':
             return self.a_star_step(game_state)
-        elif machine_state == 'expectiminimax':
-            return self.expectiminimax(game_state)
+        elif self.machine_state == 'expectiminimax':
+            return self.expectiminimax_step(game_state)
 
     def get_features(self, game_state, is_red):
         features = util.Counter()
@@ -196,75 +314,17 @@ class OffensiveAgent(PacmanAgent):
     def get_weights(self):
         return {'successor_score': 100, 'distance_to_food': -1}
 
-class DefensiveAgent(PacmanAgent):
-    """
-    A reflex agent that keeps its side Pacman-free. Again,
-    this is to give you an idea of what a defensive agent
-    could be like.  It is not the best or only way to make
-    such an agent.
-    """
 
-    def a_star(self, game_state):
-        return 0
-    
-    def expectiminimax(self, game_state):
-        return 0
-    
-    def choose_strategy(self):
-        """Choose Strategy depending on the observed state
-        
-        CASE 1 - No opponents on sight: A* to the biggest cluster of food
-        CASE 2 - Opponents on sight: ExpectiMiniMax
-        """
-        if self.state_knowledge['opponents_on_sight']:
-            return 'a_star'
-            return 'expectiminimax'
-        else:
-            return 'a_star'
-    
-    def choose_action(self, game_state):
-        # Call super() to update the state_knowledge
-        super().choose_action(game_state)
-        machine_state = self.choose_strategy()
-        if machine_state == 'a_star':
-            return self.a_star(game_state)
-        elif machine_state == 'expectiminimax':
-            return self.expectiminimax(game_state)
-    
-    def get_features(self, game_state, action):
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
-
-        my_state = successor.get_agent_state(self.index)
-        my_pos = my_state.get_position()
-
-        # Computes whether we're on defense (1) or offense (0)
-        features['on_defense'] = 1
-        if my_state.is_pacman: features['on_defense'] = 0
-
-        # Computes distance to invaders we can see
-        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
-        features['num_invaders'] = len(invaders)
-        if len(invaders) > 0:
-            dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
-            features['invader_distance'] = min(dists)
-
-        if action == Directions.STOP: features['stop'] = 1
-        rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev: features['reverse'] = 1
-
-        return features
-
-    def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
+########################################################################
+#####################   ExpectiMinimax Classes    ######################
+########################################################################
 
 class ExpectiMinimaxPlanner():
-    def __init__(self, max_depth=5):
+    def __init__(self, max_depth=10, index=None, evaluation_function=None):
         self.max_depth = max_depth
-
-    def evaluation_function(self, game_state):
-        return 0
+        self.max_agent_index = index
+        assert evaluation_function is not None, 'Evaluation function must be provided'
+        self.evaluation_function = evaluation_function
     
     def game_terminal(self, game_state, current_depth):
         return self.max_depth == current_depth or game_state.is_over()
@@ -278,26 +338,52 @@ class ExpectiMinimaxPlanner():
         else:
             return successor
     
-    def max_value(self, game_state, current_depth, alpha, beta):
-        # Check for terminal state, return V, None
-        if self.game_terminal(game_state, current_depth):
-            return self.evaluation_function(game_state), None
+    def expect_value(self, current_state, current_depth, alpha, beta, enemies_on_sight):
+        if self.game_terminal(current_state, current_depth):
+            return self.evaluation_function(current_state, enemies_on_sight)
+        
+        final_value = 0
+        remaining_enemies = enemies_on_sight.copy()
+        expect_agent_index = remaining_enemies.pop(0)
+
+        legal_actions = current_state.get_legal_actions(expect_agent_index)
+        action_probabilities = [1 / len(legal_actions) for _ in range(len(legal_actions))]
+        for action, prob in zip(legal_actions, action_probabilities):
+            next_state = self.get_new_state(current_state, action, expect_agent_index)
+            if len(remaining_enemies) == 0:
+                value = self.max_value(next_state, current_depth + 1, alpha, beta, enemies_on_sight)
+            else:
+                value = self.expect_value(next_state, current_depth, alpha, beta, enemies_on_sight)
+            
+            final_value += prob * value
+        return final_value
+
+    def max_value(self, current_state, current_depth, alpha, beta, enemies_on_sight):
+        if self.game_terminal(current_state, current_depth):
+            return self.evaluation_function(current_state, enemies_on_sight)
+        
         v = float('-inf')
+
+        for action in current_state.get_legal_actions(self.max_agent_index):
+            next_state = self.get_new_state(current_state, action, self.max_agent_index)
+            v = max(v, self.expect_value(next_state, current_depth + 1, alpha, beta, enemies_on_sight))
+            if v >= beta:
+                return v
+            alpha = max(alpha, v)
+        return v
+    
+    def get_maximizing_action(self, game_state, enemies_on_sight):
+        best_value = float('-inf')
         best_action = None
 
-        for action in game_state.get_legal_actions(self.index):
-            successor = self.get_new_state(game_state, action, self.index)
-            # v2, _ = self.min_value(successor, current_depth + 1, alpha, beta)
-            # if v2 > v:
-            #     v = v2
-            #     best_action = action
-            # if v > beta:
-            #     return v, best_action
-            # alpha = max(alpha, v)
-
-
-    def get_action(self, game_state):
-        return self.max
+        for action in game_state.get_legal_actions(self.max_agent_index):
+            next_state = self.get_new_state(game_state, action, self.max_agent_index)
+            v = self.expect_value(next_state, 0, float('-inf'), float('inf'), enemies_on_sight)
+            print(f'Action: {action}, Value: {v}')
+            if v > best_value:
+                best_value = v
+                best_action = action
+        return best_action
 
 ########################################################################
 #########################   A STAR CLASSES    ##########################
@@ -349,7 +435,7 @@ class PositionSearchProblem():
     The state space consists of (x,y) positions in a pacman game.
     """
 
-    def __init__(self, game_state, cost_fn = lambda x: 1, goal=(1, 1), index=0):
+    def __init__(self, game_state, cost_fn = lambda x: 1, goal= [(0, 0)], index=0):
         """
         Stores the start and goal.
 
@@ -366,7 +452,7 @@ class PositionSearchProblem():
         return self.startState
 
     def is_goal_state(self, state):
-        return state.get_agent_position(self.index) == self.goal
+        return state.get_agent_position(self.index) in self.goal
 
     def get_successors(self, state):
         """
@@ -434,11 +520,7 @@ class AStarEngine():
 
     def find_path(self, game_state, goal):
         problem = PositionSearchProblem(game_state=game_state, goal=goal, index=self.index)
-        import time
-        start_time = time.time()
-        print(f'Finding path from {game_state.get_agent_state(self.index).get_position()} to {goal} (manh_d = {manhattan_heuristic(game_state, problem, self.index)})')
         actions = self.a_star_search(problem)
-        print('Time elapsed:', time.time() - start_time)
         return actions
     
     def has_path(self):
@@ -451,3 +533,5 @@ class AStarEngine():
             return Directions.STOP
         return self.current_path.pop(0)
     
+    def reset(self):
+        self.current_path = []
