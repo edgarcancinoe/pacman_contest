@@ -51,20 +51,41 @@ class PacmanAgent(CaptureAgent):
     A base class for reflex agents that choose score-maximizing actions
     """
 
-    def __init__(self, index, time_for_computing=.1, bag_capacity=4, max_depth=2):
+    def __init__(self, index, time_for_computing=.1, max_depth=2):
         super().__init__(index, time_for_computing)
         self.max_depth = max_depth
         self.start = None
         self.is_red = None
         self.last_position = None
-        self.bag_capacity = bag_capacity
         self.machine_state = None
+        self.initial_food_count = None
 
+    def bag_capacity(self, game_state):
+        # Get number of remaining food pellets to carry
+        food_remaining =len(game_state.get_red_food().as_list()) if not self.is_red else len(game_state.get_blue_food().as_list())
+        if self.initial_food_count is None:
+            self.initial_food_count = food_remaining
+        remaining_percentage = food_remaining / self.initial_food_count if self.initial_food_count > 0 else 0
+        if remaining_percentage > 0.7:
+            # If there is more than 70% of initial food, we carry a small percentage (30%)
+            dynamic_capacity = int(food_remaining * 0.3)
+        elif remaining_percentage > 0.5:
+            # If there is more than 50% of initial food, we carry a medium percentage (40%)
+            dynamic_capacity = int(food_remaining * 0.4)
+        elif remaining_percentage > 0.3:
+            # If there is more than 30% of initial food, we carry a medium percentage (60%)
+            dynamic_capacity = int(food_remaining * 0.6)
+        else:
+            # If there is less than 30% of initial food, we carry a high percentage (80%)
+            dynamic_capacity = int(food_remaining * 0.8)
+
+        return dynamic_capacity
+        
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
         self.last_position = self.start
         self.is_red = game_state.is_on_red_team(self.index)
-        print('I am agent', self.index, 'and I am on the red team:', self.is_red)
+        # print('I am agent', self.index, 'and I am on the red team:', self.is_red)
         CaptureAgent.register_initial_state(self, game_state)
 
     def get_opponents_information(self, game_state):
@@ -180,6 +201,7 @@ class PacmanAgent(CaptureAgent):
 
         # Min distance to food
         food_list = game_state.get_red_food().as_list() if not self.is_red else game_state.get_blue_food().as_list()
+        
         features["min_dist_food"] = (
             min([self.get_maze_distance(my_pos, food) for food in food_list]) if food_list else 0
         )
@@ -247,7 +269,7 @@ class OffensiveAgent(PacmanAgent):
         Normally, weights depend on the game state.
         """
         if game_state.get_agent_state(self.index).is_pacman :
-            if self.state_knowledge['num_food_carrying'] >= self.bag_capacity:
+            if self.state_knowledge['num_food_carrying'] >= self.bag_capacity(game_state):
                 return {"min_dist_opponents" : 30, "min_dist_house" : -40}
             else:
                 return {"min_dist_scared_ghost" : -30, "min_dist_opponents" : 25, "min_dist_caps" : -60, "min_dist_food" : -30}
@@ -262,7 +284,7 @@ class OffensiveAgent(PacmanAgent):
 
         # Is there still food in the maze? OR is the agent carrying the maximum amount of food? -> Return to base side
         food_list = game_state.get_red_food().as_list() if not self.is_red else game_state.get_blue_food().as_list()
-        if len(food_list) == 0 or self.state_knowledge['num_food_carrying'] >= self.bag_capacity:
+        if len(food_list) == 0 or self.state_knowledge['num_food_carrying'] >= self.bag_capacity(game_state):
             # Return to base side: All x,y where x is base_x and y is not a wall
             base_x = game_state.get_walls().width // 2 
             base_x = base_x if not self.is_red else base_x - 1
@@ -286,12 +308,12 @@ class OffensiveAgent(PacmanAgent):
         CASE 2 - Opponents on sight: ExpectiMiniMax
         """
         if self.state_knowledge['opponents_on_sight']:
-            if self.machine_state == 'a_star':
-                print(f'{self.name}: Switching to ExpectiMiniMax strategy')
+            # if self.machine_state == 'a_star':
+                # print(f'{self.name}: Switching to ExpectiMiniMax strategy')
             return 'expectiminimax'
         else:
             if self.machine_state == 'expectiminimax':
-                print(f'{self.name}: Switching to A* strategy')
+                # print(f'{self.name}: Switching to A* strategy')
                 self.a_star_engine.reset()
             return 'a_star'
 
@@ -320,14 +342,14 @@ class DefensiveAgent(PacmanAgent):
         if not game_state.get_agent_state(self.index).is_pacman and not self.state_knowledge['scared']:
             prev_opp_info = self.get_opponents_information(previous_state)
             current_opp_info = self.get_opponents_information(game_state)
-            # Posicion antigua del pacman
+            # Pacman's previous position
             last_pos = previous_state.get_agent_state(self.index).get_position()
-            # vamos a guardar los indices de los pacmans oponentes que estaban a distancia <= 2
+            # Find opponents at distance <= 2 (reachable by pacman in next time step)
             indexes = []
             for ind, pos, pacman in zip(prev_opp_info["obs_opponent_indexes"], prev_opp_info["obs_opponent_positions"], prev_opp_info["observed_opponent_ispacman"]):
                 if pacman and self.get_maze_distance(last_pos, pos) <= 2:
                     indexes.append(ind)
-            # Si en el estado actual alguno de esos pacmans ya no esta (se lo han comido) devolvemos distinto que 1 y 0
+            # Return if any of the previous on-sight pacmans can't be seen anymore (means they have been eaten) because they were at distance <= 2
             if any(item in indexes for item in current_opp_info["obs_opponent_indexes"]):
                 return 2
         if self.max_depth == current_depth or game_state.is_over():
@@ -363,8 +385,7 @@ class DefensiveAgent(PacmanAgent):
         for i, noisy_distance in enumerate(opp_distances):
             opponent_positions = util.Counter()  # Almacena las posiciones posibles y sus probabilidades
             
-            # Recorre todas las posiciones posibles del tablero y 
-
+            # Recorre todas las posiciones posibles del tablero y calcula la probabilidad de que el oponente esté en cada una
             for x in range(game_state.get_walls().width):
                 for y in range(game_state.get_walls().height):
                     # Check if there's no wall at the position (x, y)
@@ -385,15 +406,15 @@ class DefensiveAgent(PacmanAgent):
                 in_zone.append((x, y))
             elif not self.is_red and x >= base_x:
                 in_zone.append((x, y))
-        print(in_zone)
+        # print(in_zone)
         if in_zone:
-            print("Hay goal en la zona")
             goal = min(in_zone, key=lambda opp: self.get_maze_distance(my_pos, opp))
         else:
             (bx, by)= min(best_positions, key=lambda opp: self.get_maze_distance(my_pos, opp))
             base_x = base_x if not self.is_red else base_x - 1
             base_points = [(base_x, y) for y in range(game_state.get_walls().height) if not game_state.has_wall(base_x, y)]
             goal = min(base_points, key=lambda opp: self.get_maze_distance((bx, by), opp))
+
         if num_times_a_star == 0:
             return self.a_star_engine.get_next_action(game_state, [goal], reset=True)
         else:
@@ -410,12 +431,12 @@ class DefensiveAgent(PacmanAgent):
         CASE 2 - Opponents on sight: ExpectiMiniMax
         """
         if self.state_knowledge['opponents_on_sight']:
-            if self.machine_state == 'a_star':
-                print(f'{self.name}: Switching to ExpectiMiniMax strategy')
+            # if self.machine_state == 'a_star':
+                # print(f'{self.name}: Switching to ExpectiMiniMax strategy')
             return 'expectiminimax'
         else:
             if self.machine_state == 'expectiminimax':
-                print(f'{self.name}: Switching to A* strategy')
+                # print(f'{self.name}: Switching to A* strategy')
                 self.a_star_engine.reset()
             return 'a_star'
 
@@ -516,7 +537,6 @@ class ExpectiMinimaxPlanner():
         return v
     
     def opponent_action_value(self, state, current_depth, alpha, beta, enemies_on_sight, previous_state):
-        # return self.min_value(state, current_depth, alpha, beta, enemies_on_sight)
         return self.min_value(state, current_depth, alpha, beta, enemies_on_sight, previous_state)
 
 ########################################################################
