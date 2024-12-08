@@ -51,8 +51,8 @@ class PacmanAgent(CaptureAgent):
     A base class for reflex agents that choose score-maximizing actions
     """
 
-    def __init__(self, index, time_for_computing=.1, max_depth=2):
-        super().__init__(index, time_for_computing)
+    def __init__(self, index, max_depth=2):
+        super().__init__(index)
         self.max_depth = max_depth
         self.start = None
         self.is_red = None
@@ -125,10 +125,15 @@ class PacmanAgent(CaptureAgent):
         state_info['my_pos'] = game_state.get_agent_state(self.index).get_position()
 
         # True-False knowledge
+        state_info['scared_opponent_close'] = any(self.get_maze_distance(state_info['my_pos'], pos) <= 5 for pos in state_info['obs_scared_positions'])
         state_info['scared'] = game_state.get_agent_state(self.index).scared_timer > 0
         state_info['reborn'] = state_info['my_pos'] == self.start and self.get_maze_distance(state_info['my_pos'], self.last_position) > 1
         state_info['opponents_on_sight'] = state_info['n_obs_opponents'] > 0
-
+        
+        # Closest opponent
+        closest_distance = min(state_info['obs_opponent_positions'], key=lambda x: self.get_maze_distance(state_info['my_pos'], x)) if state_info['obs_opponent_positions'] else None
+        state_info['closest_opponent'] = self.get_maze_distance(state_info['my_pos'], closest_distance) if closest_distance else None
+        
         # Update last position
         self.last_position = state_info['my_pos']
 
@@ -226,7 +231,7 @@ class PacmanAgent(CaptureAgent):
         )
 
         obs_opponents_scared_positions = opponents_info['obs_scared_positions']
-        features["min_dist_scared_ghost"] = min([self.get_maze_distance(my_pos, ghost) for ghost in obs_opponents_scared_positions]) if obs_opponents_scared_positions else 0
+        features["min_dist_scared_ghost"] = 1 / min([self.get_maze_distance(my_pos, ghost) for ghost in obs_opponents_scared_positions]) if obs_opponents_scared_positions else 0
 
         ## Feature that is 1 if the agent is pacman
         features["is_pacman"] = 1 if game_state.get_agent_state(self.index).is_pacman else 0
@@ -235,8 +240,8 @@ class PacmanAgent(CaptureAgent):
     
 class OffensiveAgent(PacmanAgent):
 
-    def __init__(self, index, time_for_computing=0.1):
-        super().__init__(index, time_for_computing)
+    def __init__(self, index):
+        super().__init__(index)
         self.machine_state = 'a_star'
         self.a_star_engine = AStarEngine(index, manhattan_heuristic)
         self.expectiminimax_engine = ExpectiMinimaxPlanner( 
@@ -270,14 +275,13 @@ class OffensiveAgent(PacmanAgent):
         """
         if game_state.get_agent_state(self.index).is_pacman :
             if self.state_knowledge['num_food_carrying'] >= self.bag_capacity(game_state):
-                return {"min_dist_opponents" : 30, "min_dist_house" : -40}
+                return {"min_dist_opponents" : 30, "min_dist_house" : -40, "min_dist_caps": -80 * (int(self.state_knowledge['scared_opponent_close'] == 1))}  
             else:
-                return {"min_dist_scared_ghost" : -30, "min_dist_opponents" : 25, "min_dist_caps" : -60, "min_dist_food" : -30}
-        else:
-            if self.state_knowledge['scared']:
+                return {"min_dist_scared_ghost" : 200, "min_dist_opponents" : 80, "min_dist_caps" : -70, "min_dist_food" : -30}
+        elif self.state_knowledge['scared']:
                 return {"min_dist_opponents" : 20, "min_dist_food" : -10}
-            else:
-                return {"min_dist_opponents" : -100}
+        else:
+            return {"min_dist_opponents" : -100}
             
     def a_star_step(self, game_state):
         # Check if the agent should be looking for food or returning to base
@@ -307,9 +311,10 @@ class OffensiveAgent(PacmanAgent):
         CASE 1 - No opponents on sight: A* to the nearest food
         CASE 2 - Opponents on sight: ExpectiMiniMax
         """
+        
         if self.state_knowledge['opponents_on_sight']:
             # if self.machine_state == 'a_star':
-                # print(f'{self.name}: Switching to ExpectiMiniMax strategy')
+            #     print(f'{self.name}: Switching to ExpectiMiniMax strategy')
             return 'expectiminimax'
         else:
             if self.machine_state == 'expectiminimax':
@@ -327,8 +332,8 @@ class OffensiveAgent(PacmanAgent):
             return self.expectiminimax_step(game_state)
 
 class DefensiveAgent(PacmanAgent):
-    def __init__(self, index, time_for_computing=0.1):
-        super().__init__(index, time_for_computing)
+    def __init__(self, index):
+        super().__init__(index)
         self.machine_state = 'a_star'
         self.a_star_engine = AStarEngine(index, manhattan_heuristic)
         self.last_goal_estimation_T = 0 
@@ -337,7 +342,10 @@ class DefensiveAgent(PacmanAgent):
                                                            evaluation_function=self.evaluate_minimax,
                                                            game_terminal_function=self.game_terminal)
         self.name = 'Defensive Agent'
-
+        self.last_goal = None
+        self.recalculate_every = 10
+        self.num_times_a_star = -1
+        
     def game_terminal(self, game_state, previous_state, current_depth):
         if not game_state.get_agent_state(self.index).is_pacman and not self.state_knowledge['scared']:
             prev_opp_info = self.get_opponents_information(previous_state)
@@ -367,21 +375,20 @@ class DefensiveAgent(PacmanAgent):
         else:
             # We are a ghost: We want to chase the pacman unless we are scared
             if self.state_knowledge['scared']:
-                return {"safe_dist_opponents" : 40}
+                return {"safe_dist_opponents" : 100}
             else:
                 return {"min_dist_opponents" : -100}
             
     def a_star_step(self, game_state, num_times_a_star):
+
         noisy_distances = game_state.get_agent_distances()
         opponent_indxs = game_state.get_red_team_indices() if not self.is_red else game_state.get_blue_team_indices()
         opp_distances = [noisy_distances[i] for i in opponent_indxs]
         
         best_positions = []
 
-        # Recorre cada oponente
-        # Obtiene la posición de tu Pacman
         my_pos = game_state.get_agent_position(self.index)
-
+        # Get the most probable positions
         for i, noisy_distance in enumerate(opp_distances):
             opponent_positions = util.Counter()  # Almacena las posiciones posibles y sus probabilidades
             
@@ -401,24 +408,55 @@ class DefensiveAgent(PacmanAgent):
 
         in_zone = []
         base_x = game_state.get_walls().width // 2 
+        base_x = base_x if not self.is_red else base_x - 19
         for x, y in best_positions:
             if self.is_red and x < base_x:
                 in_zone.append((x, y))
             elif not self.is_red and x >= base_x:
                 in_zone.append((x, y))
-        # print(in_zone)
+
         if in_zone:
             goal = min(in_zone, key=lambda opp: self.get_maze_distance(my_pos, opp))
-        else:
-            (bx, by)= min(best_positions, key=lambda opp: self.get_maze_distance(my_pos, opp))
-            base_x = base_x if not self.is_red else base_x - 1
-            base_points = [(base_x, y) for y in range(game_state.get_walls().height) if not game_state.has_wall(base_x, y)]
-            goal = min(base_points, key=lambda opp: self.get_maze_distance((bx, by), opp))
-
-        if num_times_a_star == 0:
+            self.last_goal = goal
             return self.a_star_engine.get_next_action(game_state, [goal], reset=True)
         else:
-            return self.a_star_engine.get_next_action(game_state, [goal], reset=False)
+            # Every n steps, 50% chance of recalculate a path a goal or recalculate if goal has been reached
+            if not self.a_star_engine.has_path() or (num_times_a_star == 0 and random.random() < 0.4):
+                # Possible goals:
+                # - With a probability p, stay in the border 
+                # - With a probability 1-p, patrol the board to the back 
+                
+                # (bx, by)= min(best_positions, key=lambda opp: self.get_maze_distance(my_pos, opp))
+                # print(self.get_maze_distance(my_pos, self.last_goal)) if self.last_goal is not None else None
+                p = 0.7
+                if random.random() < p: # Stay in the border
+                    pass
+                else:
+                    quarter = game_state.get_walls().width // 4
+                    base_x = quarter if self.is_red else 3 * quarter
+    
+                base_points = [(base_x, y) for y in range(game_state.get_walls().height//3, game_state.get_walls().height * 2 // 3) if not game_state.has_wall(base_x, y)]
+                if base_points == []:
+                    base_points = [(base_x, y) for y in range(game_state.get_walls().height) if not game_state.has_wall(base_x, y)]
+
+                # goal = min(base_points, key=lambda opp: self.get_maze_distance((bx, by), opp))
+                goal = random.choice(base_points)
+                # print('New goal:', goal)
+                # print(game_state.has_wall(goal[0], goal[1]))
+                # print(game_state)
+                # print(game_state.get_walls())
+                self.last_goal = goal       
+                return self.a_star_engine.get_next_action(game_state, [goal], reset=True)
+            else:
+                if self.last_goal is None:
+                    base_points = [(base_x, y) for y in range(game_state.get_walls().height//3, game_state.get_walls().height * 2 // 3) if not game_state.has_wall(base_x, y)]
+                    if base_points == []:
+                        base_points = [(base_x, y) for y in range(game_state.get_walls().height) if not game_state.has_wall(base_x, y)]
+                    goal = random.choice(base_points)
+                    self.last_goal = goal
+                else:
+                    goal = self.last_goal
+                return self.a_star_engine.get_next_action(game_state, [goal], reset=False)           
         
     def expectiminimax_step(self, game_state):
         return self.expectiminimax_engine.get_maximizing_action(game_state, 
@@ -430,7 +468,8 @@ class DefensiveAgent(PacmanAgent):
         CASE 1 - No opponents on sight: A* to the nearest food
         CASE 2 - Opponents on sight: ExpectiMiniMax
         """
-        if self.state_knowledge['opponents_on_sight']:
+
+        if self.state_knowledge['opponents_on_sight'] and self.state_knowledge['closest_opponent'] <= 5:
             # if self.machine_state == 'a_star':
                 # print(f'{self.name}: Switching to ExpectiMiniMax strategy')
             return 'expectiminimax'
@@ -438,16 +477,17 @@ class DefensiveAgent(PacmanAgent):
             if self.machine_state == 'expectiminimax':
                 # print(f'{self.name}: Switching to A* strategy')
                 self.a_star_engine.reset()
+                self.num_times_a_star = -1
+                self.last_goal = None
             return 'a_star'
 
     def choose_action(self, game_state):
-        num_times_a_star = -1
         # Call super() to update the state_knowledge
         super().choose_action(game_state)
         self.machine_state = self.choose_strategy()
         if self.machine_state == 'a_star':
-            num_times_a_star = (num_times_a_star + 1) % 3
-            return self.a_star_step(game_state, num_times_a_star)
+            self.num_times_a_star = (self.num_times_a_star + 1) % self.recalculate_every
+            return self.a_star_step(game_state, self.num_times_a_star)
         elif self.machine_state == 'expectiminimax':
             return self.expectiminimax_step(game_state)
 
@@ -633,6 +673,7 @@ class AStarEngine():
         self.heuristic = heuristic
         self.index = index
         self.current_path = []
+        self.max_expanded = 250
 
     def a_star_search(self, problem):
         """Search the node that has the lowest combined cost and heuristic first."""
@@ -645,7 +686,8 @@ class AStarEngine():
         initial_state = problem.get_start_state()
         found_costs[initial_state] = 0
         priority_queue.push(SearchNode(None, (initial_state, None, 0)), 0)
-
+        
+        n_expanded_nodes = 0
         while not priority_queue.is_empty():
             # Expand node
             expanded_node = priority_queue.pop()
@@ -653,7 +695,10 @@ class AStarEngine():
 
             if problem.is_goal_state(expanded_state):
                 return expanded_node.get_path()
-                    
+            
+            if n_expanded_nodes >= self.max_expanded:
+                return []
+            n_expanded_nodes += 1
             # Add nodes to frontier (priority queue)
             successors = problem.get_successors(expanded_state)
             for successor_info in successors:
