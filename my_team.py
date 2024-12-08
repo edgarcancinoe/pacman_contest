@@ -76,8 +76,8 @@ class PacmanAgent(CaptureAgent):
             # If there is more than 30% of initial food, we carry a medium percentage (60%)
             dynamic_capacity = int(food_remaining * 0.6)
         else:
-            # If there is less than 30% of initial food, we carry a high percentage (80%)
-            dynamic_capacity = int(food_remaining * 0.8)
+            # If there is less than 30% of initial food, we carry a high percentage (95%)
+            dynamic_capacity = int(food_remaining * 0.95)
 
         return dynamic_capacity
         
@@ -673,7 +673,7 @@ class AStarEngine():
         self.heuristic = heuristic
         self.index = index
         self.current_path = []
-        self.max_expanded = 250
+        self.max_expanded = 280
 
     def a_star_search(self, problem):
         """Search the node that has the lowest combined cost and heuristic first."""
@@ -697,7 +697,8 @@ class AStarEngine():
                 return expanded_node.get_path()
             
             if n_expanded_nodes >= self.max_expanded:
-                return []
+                return [random.choice(problem.get_start_state().get_legal_actions(self.index))]
+            
             n_expanded_nodes += 1
             # Add nodes to frontier (priority queue)
             successors = problem.get_successors(expanded_state)
